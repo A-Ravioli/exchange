@@ -1,0 +1,19 @@
+[package]
+name = "exchange_rs"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[lib]
+name = "exchange_rs"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+pyo3 = { version = "0.21", features = ["extension-module"], optional = true }
+rand = "0.8"
+ordered-float = "4.2"
+
+[features]
+default = []
+python = ["pyo3"]
