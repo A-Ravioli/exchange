@@ -6,8 +6,11 @@ from multi_agent_env import MultiAgentExchangeEnv
 import torch
 import torch.nn as nn
 from torch.distributions import Normal
+import wandb
+import os
+from datetime import datetime
 
-# minimal ppo implementation for self-play
+# minimal ppo implementation for self-play with wandb tracking and mps support
 
 class PolicyNetwork(nn.Module):
     """simple mlp policy"""
@@ -51,37 +54,69 @@ class ValueNetwork(nn.Module):
         return self.net(obs).squeeze(-1)
 
 
-def train_self_play(n_agents=4, n_iterations=1000, steps_per_iter=500):
+def train_self_play(n_agents=4, n_iterations=1000, steps_per_iter=500, use_wandb=True):
     """train agents with self-play using ppo"""
+    
+    # setup device (mps for apple silicon, cuda for nvidia, cpu fallback)
+    if torch.backends.mps.is_available():
+        device = torch.device("mps")
+        print("using apple mps for acceleration 🚀")
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+        print("using cuda for acceleration 🚀")
+    else:
+        device = torch.device("cpu")
+        print("using cpu (consider getting a gpu!)")
+    
+    # initialize wandb
+    if use_wandb:
+        wandb.init(
+            project="exchange-rl-selfplay",
+            config={
+                "n_agents": n_agents,
+                "n_iterations": n_iterations,
+                "steps_per_iter": steps_per_iter,
+                "learning_rate": 3e-4,
+                "gamma": 0.99,
+                "device": str(device)
+            },
+            name=f"selfplay_{n_agents}agents_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        )
+    
     env = MultiAgentExchangeEnv(n_agents=n_agents, max_steps=steps_per_iter)
     
     obs_dim = env.observation_space.shape[0]
     act_dim = env.action_space.shape[0]
     
-    # create one policy per agent
-    policies = [PolicyNetwork(obs_dim, act_dim) for _ in range(n_agents)]
-    values = [ValueNetwork(obs_dim) for _ in range(n_agents)]
+    # create one policy per agent and move to device
+    policies = [PolicyNetwork(obs_dim, act_dim).to(device) for _ in range(n_agents)]
+    values = [ValueNetwork(obs_dim).to(device) for _ in range(n_agents)]
     
     policy_opts = [torch.optim.Adam(p.parameters(), lr=3e-4) for p in policies]
     value_opts = [torch.optim.Adam(v.parameters(), lr=3e-4) for v in values]
+    
+    best_avg_pnl = -float('inf')
+    checkpoint_dir = "checkpoints/rl_selfplay"
+    os.makedirs(checkpoint_dir, exist_ok=True)
     
     for iteration in range(n_iterations):
         # collect rollout
         obs_all, _ = env.reset(seed=iteration)
         
         trajectories = [[] for _ in range(n_agents)]
+        episode_rewards = [0.0] * n_agents
         
         for step in range(steps_per_iter):
             # all agents act
             actions = {}
             for i in range(n_agents):
-                obs_tensor = torch.FloatTensor(obs_all[i])
+                obs_tensor = torch.FloatTensor(obs_all[i]).to(device)
                 action, log_prob = policies[i].act(obs_tensor)
-                actions[i] = action.detach().numpy()
+                actions[i] = action.cpu().detach().numpy()
                 trajectories[i].append({
                     'obs': obs_all[i],
-                    'action': action.detach(),
-                    'log_prob': log_prob.detach()
+                    'action': action.cpu().detach(),
+                    'log_prob': log_prob.cpu().detach()
                 })
             
             # step env
@@ -90,8 +125,12 @@ def train_self_play(n_agents=4, n_iterations=1000, steps_per_iter=500):
             # store rewards
             for i in range(n_agents):
                 trajectories[i][-1]['reward'] = rewards[i]
+                episode_rewards[i] += rewards[i]
         
         # compute returns and advantages
+        policy_losses = []
+        value_losses = []
+        
         for i in range(n_agents):
             returns = []
             G = 0
@@ -99,8 +138,8 @@ def train_self_play(n_agents=4, n_iterations=1000, steps_per_iter=500):
                 G = t['reward'] + 0.99 * G
                 returns.insert(0, G)
             
-            returns = torch.FloatTensor(returns)
-            obs = torch.FloatTensor([t['obs'] for t in trajectories[i]])
+            returns = torch.FloatTensor(returns).to(device)
+            obs = torch.FloatTensor([t['obs'] for t in trajectories[i]]).to(device)
             
             with torch.no_grad():
                 values_pred = values[i](obs)
@@ -109,14 +148,17 @@ def train_self_play(n_agents=4, n_iterations=1000, steps_per_iter=500):
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
             
             # ppo update
+            epoch_policy_loss = 0.0
+            epoch_value_loss = 0.0
+            
             for epoch in range(4):
                 # policy update
                 new_dist = policies[i](obs)
                 new_log_probs = new_dist.log_prob(
-                    torch.stack([t['action'] for t in trajectories[i]])
+                    torch.stack([t['action'].to(device) for t in trajectories[i]])
                 ).sum(-1)
                 
-                old_log_probs = torch.stack([t['log_prob'] for t in trajectories[i]])
+                old_log_probs = torch.stack([t['log_prob'].to(device) for t in trajectories[i]])
                 ratio = torch.exp(new_log_probs - old_log_probs)
                 
                 clipped_ratio = torch.clamp(ratio, 0.8, 1.2)
@@ -136,21 +178,70 @@ def train_self_play(n_agents=4, n_iterations=1000, steps_per_iter=500):
                 value_opts[i].zero_grad()
                 value_loss.backward()
                 value_opts[i].step()
+                
+                epoch_policy_loss += policy_loss.item()
+                epoch_value_loss += value_loss.item()
+            
+            policy_losses.append(epoch_policy_loss / 4)
+            value_losses.append(epoch_value_loss / 4)
+        
+        # get final pnls
+        final_pnls = [env.agents[i].cash for i in range(n_agents)]
+        avg_pnl = np.mean(final_pnls)
+        max_pnl = np.max(final_pnls)
+        total_trades = sum(env.agents[i].trades for i in range(n_agents))
+        
+        # log to wandb
+        if use_wandb:
+            wandb.log({
+                "iteration": iteration,
+                "avg_pnl": avg_pnl,
+                "max_pnl": max_pnl,
+                "min_pnl": np.min(final_pnls),
+                "avg_policy_loss": np.mean(policy_losses),
+                "avg_value_loss": np.mean(value_losses),
+                "total_trades": total_trades,
+                **{f"agent_{i}_pnl": final_pnls[i] for i in range(n_agents)},
+                **{f"agent_{i}_trades": env.agents[i].trades for i in range(n_agents)}
+            })
         
         # log progress
         if iteration % 10 == 0:
-            final_pnls = [env.agents[i].cash for i in range(n_agents)]
-            print(f"Iter {iteration}: PnLs = {[f'{p:.2f}' for p in final_pnls]}")
+            print(f"Iter {iteration}: avg_pnl={avg_pnl:.2f}, max_pnl={max_pnl:.2f}, trades={total_trades}")
+        
+        # save checkpoint (only keep best)
+        if avg_pnl > best_avg_pnl:
+            best_avg_pnl = avg_pnl
+            # delete old checkpoint
+            for f in os.listdir(checkpoint_dir):
+                if f.startswith("policies_"):
+                    os.remove(os.path.join(checkpoint_dir, f))
+            # save new checkpoint
+            checkpoint_path = os.path.join(checkpoint_dir, f"policies_iter_{iteration}_pnl_{avg_pnl:.2f}.pt")
+            torch.save({
+                'iteration': iteration,
+                'policies': [p.state_dict() for p in policies],
+                'values': [v.state_dict() for v in values],
+                'avg_pnl': avg_pnl
+            }, checkpoint_path)
+            print(f"💾 saved checkpoint: {checkpoint_path}")
+    
+    if use_wandb:
+        wandb.finish()
     
     return policies
 
 
 if __name__ == "__main__":
-    print("training agents with self-play ppo...")
-    policies = train_self_play(n_agents=4, n_iterations=200, steps_per_iter=300)
+    print("🚀 training agents with self-play ppo...")
+    print("this will run for a LONG time. grab some coffee (or take a nap).")
     
-    # save policies
-    for i, policy in enumerate(policies):
-        torch.save(policy.state_dict(), f"policy_agent_{i}.pt")
+    # LONG training run - adjust n_iterations to run longer
+    policies = train_self_play(
+        n_agents=4, 
+        n_iterations=100000,  # 100k iterations
+        steps_per_iter=500,
+        use_wandb=True
+    )
     
-    print("training complete! policies saved.")
+    print("✅ training complete!")

@@ -4,8 +4,11 @@
 import numpy as np
 from multi_agent_env import MultiAgentExchangeEnv
 from typing import List, Tuple
+import wandb
+import os
+from datetime import datetime
 
-# evolve simple rule-based strategies through tournament selection
+# evolve simple rule-based strategies through tournament selection with wandb tracking
 
 class RuleBasedAgent:
     """parameterized trading strategy"""
@@ -102,13 +105,28 @@ def tournament_select(population: List[RuleBasedAgent], fitnesses: List[float],
 
 
 def evolve_strategies(pop_size: int = 50, n_generations: int = 100, 
-                     mutation_rate: float = 0.1):
+                     mutation_rate: float = 0.1, use_wandb: bool = True):
     """evolutionary algorithm for discovering strategies"""
+    
+    # initialize wandb
+    if use_wandb:
+        wandb.init(
+            project="exchange-evolution",
+            config={
+                "pop_size": pop_size,
+                "n_generations": n_generations,
+                "mutation_rate": mutation_rate,
+            },
+            name=f"evolution_{pop_size}pop_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        )
     
     # initialize population
     population = [RuleBasedAgent() for _ in range(pop_size)]
     
     best_fitness_history = []
+    checkpoint_dir = "checkpoints/evolution"
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    best_fitness_ever = -float('inf')
     
     for gen in range(n_generations):
         # evaluate all agents
@@ -118,10 +136,33 @@ def evolve_strategies(pop_size: int = 50, n_generations: int = 100,
         best_idx = np.argmax(fitnesses)
         best_fitness = fitnesses[best_idx]
         mean_fitness = np.mean(fitnesses)
+        std_fitness = np.std(fitnesses)
         
         best_fitness_history.append(best_fitness)
         
-        print(f"Gen {gen}: best={best_fitness:.2f}, mean={mean_fitness:.2f}")
+        # log to wandb
+        if use_wandb:
+            wandb.log({
+                "generation": gen,
+                "best_fitness": best_fitness,
+                "mean_fitness": mean_fitness,
+                "std_fitness": std_fitness,
+                "worst_fitness": np.min(fitnesses)
+            })
+        
+        print(f"Gen {gen}: best={best_fitness:.2f}, mean={mean_fitness:.2f}, std={std_fitness:.2f}")
+        
+        # save checkpoint (only keep best)
+        if best_fitness > best_fitness_ever:
+            best_fitness_ever = best_fitness
+            # delete old checkpoint
+            for f in os.listdir(checkpoint_dir):
+                if f.startswith("best_agent_"):
+                    os.remove(os.path.join(checkpoint_dir, f))
+            # save new checkpoint
+            checkpoint_path = os.path.join(checkpoint_dir, f"best_agent_gen_{gen}_fit_{best_fitness:.2f}.npy")
+            np.save(checkpoint_path, population[best_idx].params)
+            print(f"💾 saved checkpoint: {checkpoint_path}")
         
         # create next generation
         new_population = [population[best_idx]]  # elitism
@@ -145,6 +186,9 @@ def evolve_strategies(pop_size: int = 50, n_generations: int = 100,
     # return best agent
     final_fitnesses = [evaluate_agent(agent, n_episodes=10) for agent in population]
     best_idx = np.argmax(final_fitnesses)
+    
+    if use_wandb:
+        wandb.finish()
     
     return population[best_idx], best_fitness_history
 
@@ -175,16 +219,16 @@ def compete_agents(agents: List[RuleBasedAgent], n_rounds: int = 10):
 
 
 if __name__ == "__main__":
-    print("evolving trading strategies...")
-    best_agent, history = evolve_strategies(pop_size=30, n_generations=50, mutation_rate=0.15)
+    print("🧬 evolving trading strategies...")
+    print("this will run for a LONG time. go touch grass.")
     
-    print(f"\nBest fitness trajectory: {history[-10:]}")
+    # LONG evolution run
+    best_agent, history = evolve_strategies(
+        pop_size=100,  # larger population
+        n_generations=50000,  # 50k generations
+        mutation_rate=0.15,
+        use_wandb=True
+    )
+    
+    print(f"\n✅ evolution complete!")
     print(f"Best agent parameters: {best_agent.params}")
-    
-    # save best agent
-    np.save("best_agent_params.npy", best_agent.params)
-    
-    print("\n--- testing competitive play ---")
-    # create diverse agents and compete
-    agents = [best_agent] + [RuleBasedAgent() for _ in range(3)]
-    compete_agents(agents, n_rounds=5)
