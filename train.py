@@ -9,11 +9,7 @@ from torch.cuda.amp import autocast, GradScaler
 from datetime import datetime
 import os
 import copy
-import sys
-
-# add src to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
-
+# import from src
 from src.parallel_env import ParallelEnv
 from src.multi_agent_env import MultiAgentExchangeEnv
 from src.networks import LargePolicyNetwork, LargeValueNetwork, PolicyNetwork

@@ -6,42 +6,45 @@ i built the original version in julia kinda quickly over a weekend, but julia ki
 
 i wrote a short blog post on how the exchanges work and it walks you through how to derive each feature logically (first principles-y and stuff). that blogpost will be linked here somewhere somehow eventually i hope. 
 
-i will later finish rebuilding this in rust so that i can speed up the execution speed of this significantly to scale RL faster.
+# repo structure
 
 # how to make your way around the repo
 
 here's a chill lil tree for the repo.
 
 ```bash
-src/ // core python implementation
-    exchange.py        // order book and matching engine (fifo + prorata)
-    sim.py             // discrete event simulation
-    algorithms.py      // trading algorithms (market maker, random trader)
-    visualizer.py      // terminal visualization of the book
-    gym_env.py         // single-agent gymnasium wrapper
-    multi_agent_env.py // multi-agent competitive environment
-    train_rl.py        // ppo self-play training
-    evolve.py          // evolutionary strategies for discovering trading rules
+src/                    # core python implementation
+    exchange.py         # order book and matching engine (fifo + prorata)
+    sim.py              # discrete event simulation
+    algorithms.py       # trading algorithms (market maker, random trader)
+    visualizer.py       # terminal visualization of the book
+    gym_env.py          # single-agent gymnasium wrapper
+    multi_agent_env.py  # multi-agent competitive environment
+    parallel_env.py     # parallel environment wrapper for faster training
+    networks.py         # neural network architectures for rl
+    evolve.py           # evolutionary strategies for discovering trading rules
+    test_*.py           # tests
 
-examples/
-    gym_example.py           // basic rl usage example
-    discover_strategies.py   // full strategy discovery pipeline
-    test_multi_agent.py      // test multi-agent competition
+src.vector/             # gpu-accelerated vectorized implementation
+    exchange_vector.py  # vectorized order book using pytorch tensors
+    vec_env.py          # vectorized multi-agent environment
+    batch_sim.py        # batched simulation for parallel training
+    matching_kernels.py # optimized matching algorithms
 
-docs/
-    building-an-exchange.md  // walkthrough of how this was built (that blog post!)
-    strategy-discovery.md    // guide to rl and evolution experiments
+src.jl/                 # original version in julia
 
-src.jl/ // in julia
-    Exchange.jl     // order book, but in julia
-    Sim.jl          // discrete event sim
-    Algorithms.jl   // trading strategies
-    Visualizer.jl   // plotting
+src.rs/                 # accelerated version in rust
 
-src.rs/ // in rust, so faster, i may delete this or have the python version wrap it
-    exchange.rs // order book, but 30x faster
-    sim.rs      // discrete event sim
-    py.rs       // python bindings via pyo3
+train.py                # unified training script (rl, evolution, hybrid)
+
+examples/               # usage examples
+    gym_example.py           # basic rl usage example
+    discover_strategies.py   # full strategy discovery pipeline
+    test_multi_agent.py      # test multi-agent competition
+
+docs/                   # documentation
+    building-an-exchange.md  # walkthrough of how this was built
+    strategy-discovery.md    # guide to rl and evolution experiments
 ```
 
 # quick start
@@ -74,7 +77,7 @@ visualize_book(book)
 wrapped the exchange in a gymnasium environment so you can train rl agents on it. single-agent version:
 
 ```python
-from gym_env import ExchangeEnv
+from src.gym_env import ExchangeEnv
 
 env = ExchangeEnv(max_steps=1000)
 obs, info = env.reset()
@@ -88,47 +91,30 @@ for _ in range(1000):
 env.render()  # shows the order book + your position
 ```
 
-# discovering hft strategies with rl and evolution
+# training agents
 
-here's where it gets fun. i built three ways to discover trading strategies through competition:
-
-## 1. evolutionary strategies
-
-genetic algorithms for rule-based strategies. fast and interpretable.
+use the consolidated training script for all modes:
 
 ```bash
-python src/evolve.py
+# rl training with all optimizations (default)
+python train.py --mode rl --n_agents 4 --n_iterations 1000 --n_envs 32
+
+# evolutionary strategies
+python train.py --mode evolution --n_agents 8 --n_iterations 500
+
+# hybrid mode (rl + evolution)
+python train.py --mode hybrid --n_agents 4 --n_iterations 1000
+
+# options
+python train.py --help
 ```
 
-evolves 50 agents over 100 generations. each agent has 12 parameters controlling:
-- when to buy vs sell based on order book imbalance
-- how far from mid to place orders
-- position sizing
-- inventory mean reversion
-
-saves the best agent's parameters to `best_agent_params.npy`.
-
-## 2. rl with self-play
-
-train neural network policies that compete against each other.
-
-```bash
-python src/train_rl.py
-```
-
-4 agents with separate mlp policies compete in the same order book. uses ppo with relative rewards (zero-sum). as agents get better, the environment gets harder. classic self-play dynamics.
-
-saves trained policies to `policy_agent_0.pt`, etc.
-
-## 3. hybrid competition
-
-combine both approaches:
-
-```bash
-python examples/discover_strategies.py
-```
-
-evolves initial strategies, creates variants through mutation, then runs tournaments to find winners.
+the training script includes:
+- parallel environments for faster data collection
+- larger neural networks for better capacity
+- mixed precision training (cuda only)
+- mini-batch ppo with multiple epochs
+- wandb integration for logging
 
 ## what strategies emerge?
 
@@ -156,6 +142,12 @@ the multi-agent environment forces agents to compete, so they evolve strategies 
 - deterministic time advancement
 - runs way faster than real time (~500k events/sec in python)
 
+**vectorized implementation:**
+- gpu-accelerated order book using pytorch tensors
+- 50-100x speedup over regular python
+- batch processing of multiple orders
+- parallel environment execution
+
 **strategy discovery:**
 - evolutionary strategies (genetic algorithms)
 - ppo self-play (neural networks)
@@ -170,15 +162,13 @@ the multi-agent environment forces agents to compete, so they evolve strategies 
 # dependencies
 
 ```bash
-uv venv
-uv pip install numpy sortedcontainers gymnasium torch
+pip install numpy sortedcontainers gymnasium torch wandb
 ```
 
 # performance
 
 - python: ~500k events/sec (m1 mac)
-- rust: ~15m events/sec (30x faster)
-- julia: ~8m events/sec (16x faster) 
+- vectorized (gpu): 50-100x faster with batching
 
 # license
 it's MIT licensed. don't do anything weird. the license is in [LICENSE](LICENSE)
