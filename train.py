@@ -1,15 +1,7 @@
 #!/usr/bin/env python3
-"""
-Enhanced RL training with all optimizations:
-- Parallel environments
-- Larger networks  
-- More PPO epochs
-- Mixed precision training
-- Gradient accumulation
+# consolidated training script for exchange rl agents
 
-This is the final optimized training loop combining all phases.
-"""
-
+import argparse
 import numpy as np
 import torch
 import torch.nn as nn
@@ -17,36 +9,44 @@ from torch.cuda.amp import autocast, GradScaler
 from datetime import datetime
 import os
 import copy
+import sys
 
-from parallel_env import ParallelEnv
-from multi_agent_env import MultiAgentExchangeEnv
-from networks import LargePolicyNetwork, LargeValueNetwork
+# add src to path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+
+from src.parallel_env import ParallelEnv
+from src.multi_agent_env import MultiAgentExchangeEnv
+from src.networks import LargePolicyNetwork, LargeValueNetwork, PolicyNetwork
+from src.evolve import RuleBasedAgent, evolve_population
 
 import wandb
 
 
-def train_self_play_v2(
+def train_rl(
     n_agents=4,
     n_iterations=1000,
     steps_per_iter=500,
-    n_envs=32,  # Phase 1: Parallel envs
+    n_envs=32,
     use_wandb=True,
-    network_size='large',  # Phase 2: Larger networks
-    ppo_epochs=20,  # Phase 4: More PPO epochs
-    use_mixed_precision=True,  # Phase 4: Mixed precision
-    mini_batch_size=256  # Phase 4: Mini-batch training
+    network_size='large',
+    ppo_epochs=20,
+    use_mixed_precision=True,
+    mini_batch_size=256,
+    mode='rl'  # 'rl', 'evolution', or 'hybrid'
 ):
     """
-    Fully optimized training with all phases combined.
-    
-    Expected speedup: 50-100x over baseline
+    unified training function with all optimizations
+    - parallel environments
+    - larger networks
+    - mixed precision training
+    - mini-batch ppo
     """
     
-    # Setup device
+    # setup device
     if torch.backends.mps.is_available():
         device = torch.device("mps")
         print("using apple mps for acceleration 🚀")
-        use_mixed_precision = False  # MPS doesn't support AMP yet
+        use_mixed_precision = False  # mps doesn't support amp yet
     elif torch.cuda.is_available():
         device = torch.device("cuda")
         print("using cuda for acceleration 🚀")
@@ -55,10 +55,10 @@ def train_self_play_v2(
         print("using cpu")
         use_mixed_precision = False
     
-    #Initialize wandb
+    # initialize wandb
     if use_wandb:
         wandb.init(
-            project="exchange-rl-v2-optimized",
+            project=f"exchange-{mode}",
             config={
                 "n_agents": n_agents,
                 "n_iterations": n_iterations,
@@ -70,12 +70,12 @@ def train_self_play_v2(
                 "device": str(device),
                 "network_size": network_size,
                 "mixed_precision": use_mixed_precision,
-                "optimization_level": "v2_full"
+                "mode": mode
             },
-            name=f"v2_{n_envs}envs_{network_size}_ppo{ppo_epochs}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            name=f"{mode}_{n_envs}envs_{network_size}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         )
     
-    # Phase 1: Create parallel environments
+    # create parallel environments
     env_fns = [
         lambda: MultiAgentExchangeEnv(n_agents=n_agents, max_steps=steps_per_iter)
         for _ in range(n_envs)
@@ -85,35 +85,38 @@ def train_self_play_v2(
     obs_dim = par_env.observation_space.shape[0]
     act_dim = par_env.action_space.shape[0]
     
-    # Phase 2: Create larger networks
-    policies = [LargePolicyNetwork(obs_dim, act_dim).to(device) for _ in range(n_agents)]
-    values = [LargeValueNetwork(obs_dim).to(device) for _ in range(n_agents)]
+    # create networks
+    if network_size == 'large':
+        policies = [LargePolicyNetwork(obs_dim, act_dim).to(device) for _ in range(n_agents)]
+        values = [LargeValueNetwork(obs_dim).to(device) for _ in range(n_agents)]
+    else:
+        policies = [PolicyNetwork(obs_dim, act_dim).to(device) for _ in range(n_agents)]
+        values = [PolicyNetwork(obs_dim, 1).to(device) for _ in range(n_agents)]
     
     policy_opts = [torch.optim.Adam(p.parameters(), lr=3e-4) for p in policies]
     value_opts = [torch.optim.Adam(v.parameters(), lr=3e-4) for v in values]
     
-    # Phase 4: Mixed precision scaler
+    # mixed precision scaler
     scaler = GradScaler() if use_mixed_precision else None
     
-    # Policy pool for diversity
+    # policy pool for diversity
     policy_pool = []
     
     best_avg_pnl = -float('inf')
-    checkpoint_dir = "checkpoints/rl_v2"
+    checkpoint_dir = f"checkpoints/{mode}"
     os.makedirs(checkpoint_dir, exist_ok=True)
     
-    print(f"\n🚀 Starting optimized training:")
+    print(f"\n🚀 starting {mode} training:")
     print(f"   {n_envs} parallel environments")
     print(f"   {network_size} networks")
-    print(f"   {ppo_epochs} PPO epochs")
-    print(f"   Mixed precision: {use_mixed_precision}")
-    print(f"   Expected: 50-100x speedup\n")
+    print(f"   {ppo_epochs} ppo epochs")
+    print(f"   mixed precision: {use_mixed_precision}\n")
     
     for iteration in range(n_iterations):
-        # Collect rollouts from ALL parallel environments
+        # collect rollouts from all parallel environments
         obs_all = par_env.reset(seed=iteration)
         
-        # Trajectories for each agent, across all envs
+        # trajectories for each agent, across all envs
         trajectories = [[[] for _ in range(n_envs)] for _ in range(n_agents)]
         episode_rewards = [[0.0 for _ in range(n_envs)] for _ in range(n_agents)]
         
@@ -139,7 +142,7 @@ def train_self_play_v2(
                         'log_prob': log_prob[env_id].cpu()
                     })
             
-            # Convert to list of dicts (one dict per env)
+            # convert to list of dicts (one dict per env)
             actions_list = []
             for env_id in range(n_envs):
                 env_actions = {
@@ -155,12 +158,12 @@ def train_self_play_v2(
                     trajectories[agent_id][env_id][-1]['reward'] = rewards[agent_id][env_id]
                     episode_rewards[agent_id][env_id] += rewards[agent_id][env_id]
         
-        # Phase 4: Enhanced training loop with more PPO epochs
+        # training loop with mini-batch ppo
         policy_losses = []
         value_losses = []
         
         for agent_id in range(n_agents):
-            # Combine trajectories from all envs
+            # combine trajectories from all envs
             all_obs = []
             all_actions = []
             all_log_probs = []
@@ -191,12 +194,12 @@ def train_self_play_v2(
             advantages = returns_batch - values_pred
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
             
-            # Phase 4: More PPO epochs with mini-batches
+            # ppo epochs with mini-batches
             epoch_policy_loss = 0.0
             epoch_value_loss = 0.0
             
-            for epoch in range(ppo_epochs):  # 20 epochs instead of 4
-                # Mini-batch training
+            for epoch in range(ppo_epochs):
+                # mini-batch training
                 n_samples = len(obs_batch)
                 indices = torch.randperm(n_samples)
                 
@@ -212,7 +215,7 @@ def train_self_play_v2(
                     
                     if use_mixed_precision:
                         with autocast():
-                            # Policy loss
+                            # policy loss
                             new_dist = policies[agent_id](mb_obs)
                             new_log_probs = new_dist.log_prob(mb_actions).sum(-1)
                             ratio = torch.exp(new_log_probs - mb_old_log_probs)
@@ -222,11 +225,11 @@ def train_self_play_v2(
                                 clipped_ratio * mb_advantages
                             ).mean()
                             
-                            # Value loss
+                            # value loss
                             value_pred = values[agent_id](mb_obs)
                             value_loss = (value_pred - mb_returns).pow(2).mean()
                         
-                        # Backward with scaling
+                        # backward with scaling
                         scaler.scale(policy_loss).backward()
                         scaler.step(policy_opts[agent_id])
                         scaler.update()
@@ -237,7 +240,7 @@ def train_self_play_v2(
                         scaler.update()
                         value_opts[agent_id].zero_grad()
                     else:
-                        # Standard precision
+                        # standard precision
                         new_dist = policies[agent_id](mb_obs)
                         new_log_probs = new_dist.log_prob(mb_actions).sum(-1)
                         ratio = torch.exp(new_log_probs - mb_old_log_probs)
@@ -266,12 +269,12 @@ def train_self_play_v2(
             policy_losses.append(epoch_policy_loss / (ppo_epochs * (n_samples // mini_batch_size + 1)))
             value_losses.append(epoch_value_loss / (ppo_epochs * (n_samples // mini_batch_size + 1)))
         
-        # Get final PnLs
+        # get final pnls
         final_pnls = [np.mean(episode_rewards[i]) for i in range(n_agents)]
         avg_pnl = np.mean(final_pnls)
         max_pnl = np.max(final_pnls)
         
-        # Log to wandb
+        # log to wandb
         if use_wandb:
             wandb.log({
                 "iteration": iteration,
@@ -283,11 +286,11 @@ def train_self_play_v2(
                 **{f"agent_{i}_pnl": final_pnls[i] for i in range(n_agents)}
             })
         
-        # Log progress
+        # log progress
         if iteration % 10 == 0:
-            print(f"Iter {iteration}: avg_pnl={avg_pnl:.2f}, max_pnl={max_pnl:.2f}")
+            print(f"iter {iteration}: avg_pnl={avg_pnl:.2f}, max_pnl={max_pnl:.2f}")
         
-        # Policy diversity
+        # policy diversity
         if iteration > 0 and iteration % 50 == 0:
             best_agent_idx = np.argmax(final_pnls)
             policy_copy = copy.deepcopy(policies[best_agent_idx])
@@ -296,7 +299,7 @@ def train_self_play_v2(
             if len(policy_pool) > 10:
                 policy_pool.pop(0)
         
-        # Save checkpoint
+        # save checkpoint
         if avg_pnl > best_avg_pnl:
             best_avg_pnl = avg_pnl
             for f in os.listdir(checkpoint_dir):
@@ -326,19 +329,55 @@ def train_self_play_v2(
     return policies
 
 
+def main():
+    parser = argparse.ArgumentParser(description='train exchange trading agents')
+    parser.add_argument('--mode', type=str, default='rl', choices=['rl', 'evolution', 'hybrid'],
+                        help='training mode (default: rl)')
+    parser.add_argument('--n_agents', type=int, default=4, help='number of agents')
+    parser.add_argument('--n_iterations', type=int, default=1000, help='training iterations')
+    parser.add_argument('--steps_per_iter', type=int, default=500, help='steps per iteration')
+    parser.add_argument('--n_envs', type=int, default=32, help='parallel environments')
+    parser.add_argument('--network_size', type=str, default='large', choices=['small', 'large'],
+                        help='network size')
+    parser.add_argument('--ppo_epochs', type=int, default=20, help='ppo epochs')
+    parser.add_argument('--mini_batch_size', type=int, default=256, help='mini batch size')
+    parser.add_argument('--no_wandb', action='store_true', help='disable wandb logging')
+    parser.add_argument('--no_mixed_precision', action='store_true', help='disable mixed precision')
+    
+    args = parser.parse_args()
+    
+    print(f"🚀 starting {args.mode} training...")
+    print(f"   agents: {args.n_agents}")
+    print(f"   iterations: {args.n_iterations}")
+    print(f"   parallel envs: {args.n_envs}")
+    print(f"   network: {args.network_size}")
+    print()
+    
+    if args.mode == 'evolution':
+        # run evolution instead of rl
+        env = MultiAgentExchangeEnv(n_agents=args.n_agents, max_steps=args.steps_per_iter)
+        population = evolve_population(
+            env=env,
+            pop_size=args.n_agents * 4,
+            n_generations=args.n_iterations,
+            use_wandb=not args.no_wandb
+        )
+        print("\n✅ evolution complete!")
+    else:
+        policies = train_rl(
+            n_agents=args.n_agents,
+            n_iterations=args.n_iterations,
+            steps_per_iter=args.steps_per_iter,
+            n_envs=args.n_envs,
+            use_wandb=not args.no_wandb,
+            network_size=args.network_size,
+            ppo_epochs=args.ppo_epochs,
+            use_mixed_precision=not args.no_mixed_precision,
+            mini_batch_size=args.mini_batch_size,
+            mode=args.mode
+        )
+        print("\n✅ rl training complete!")
+
+
 if __name__ == "__main__":
-    print("🚀 Training with FULL optimizations (v2)...")
-    print("Expected: 50-100x speedup over baseline\n")
-    
-    policies = train_self_play_v2(
-        n_agents=4,
-        n_iterations=50,  # Short test run
-        steps_per_iter=100,
-        n_envs=8,  # Parallel envs
-        use_wandb=False,
-        network_size='large',
-        ppo_epochs=10,  # More epochs
-        use_mixed_precision=True
-    )
-    
-    print("\n✅ V2 training complete!")
+    main()
