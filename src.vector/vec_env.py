@@ -1,7 +1,5 @@
-"""
-Vectorized Multi-Agent Exchange Environment.
-API-compatible with MultiAgentExchangeEnv but uses vectorized order books.
-"""
+# vectorized multi-agent exchange environment
+# api-compatible with MultiAgentExchangeEnv but uses vectorized order books
 
 import numpy as np
 import gymnasium as gym
@@ -17,10 +15,8 @@ except ImportError:
 
 
 class VectorizedMultiAgentEnv(gym.Env):
-    """
-    Vectorized version of MultiAgentExchangeEnv.
-    Can run single env (API compatible) or multiple envs in parallel.
-    """
+    # vectorized version of multi-agent exchange env
+    # can run single env (api compatible) or multiple envs in parallel
     
     def __init__(
         self,
@@ -37,7 +33,7 @@ class VectorizedMultiAgentEnv(gym.Env):
         self.n_envs = n_envs
         self.device = device
         
-        # Action and observation spaces (same as original)
+        # action and observation spaces (same as original)
         self.action_space = spaces.Box(
             low=np.array([0, -5.0, 1], dtype=np.float32),
             high=np.array([1, 5.0, 50], dtype=np.float32),
@@ -48,66 +44,60 @@ class VectorizedMultiAgentEnv(gym.Env):
             low=-np.inf, high=np.inf, shape=(22 + n_agents,), dtype=np.float32
         )
         
-        # Create batched simulation
+        # create batched simulation
         self.sim = BatchedSimulation(n_envs=n_envs, tick_size=tick_size, device=device)
         
-        # Agent states per environment
+        # agent states per environment
         self.agents = [[AgentState(i) for i in range(n_agents)] for _ in range(n_envs)]
         self.step_counts = [0] * n_envs
     
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         
-        # Reset simulation
+        # reset simulation
         self.sim.reset_all()
         
-        # Reset agent states
+        # reset agent states
         for env_agents in self.agents:
             for agent in env_agents:
                 agent.reset()
         
         self.step_counts = [0] * self.n_envs
         
-        # Add background traders (simplified - using CPU simulation)
-        # Full GPU version would need these vectorized too
+        # add background traders (simplified - using cpu simulation)
+        # full gpu version would need these vectorized too
         
-        # Get initial observations
+        # get initial observations
         obs_all = self._get_obs_all()
         
         if self.n_envs == 1:
-            # Single env mode - return dict
+            # single env mode - return dict
             return obs_all[0], {}
         else:
-            # Multi env mode - return batched observations
+            # multi env mode - return batched observations
             return obs_all, {}
     
     def step(self, actions):
-        """
-        Step the environment(s).
+        # step the environment(s)
+        # actions: dict {agent_id: action} for single env OR list[dict] for multiple envs
+        # returns obs, rewards, dones, truncs, infos
         
-        Args:
-            actions: Dict {agent_id: action} for single env
-                     OR List[Dict] for multiple envs
-        
-        Returns:
-            obs, rewards, dones, truncs, infos
-        """
-        # Handle both single and multi-env mode
+        # handle both single and multi-env mode
         if self.n_envs == 1:
             actions_batch = [actions]
         else:
             actions_batch = actions if isinstance(actions, list) else [actions] * self.n_envs
         
-        # Process actions through simulation
+        # process actions through simulation
         initial_states = [
             [(a.inventory, a.cash) for a in env_agents]
             for env_agents in self.agents
         ]
         
-        # Step simulation
+        # step simulation
         results = self.sim.step_batch(actions_batch)
         
-        # Update agent states and compute rewards
+        # update agent states and compute rewards
         obs_all = []
         rewards_all = []
         dones_all = []
@@ -117,32 +107,32 @@ class VectorizedMultiAgentEnv(gym.Env):
         for env_id in range(self.n_envs):
             self.step_counts[env_id] += 1
             
-            # Get book state
+            # get book state
             book = self.sim.books[env_id]
             best_bid, best_ask = book.get_best_bid_ask()
             mid = (best_bid + best_ask) / 2 if not np.isnan(best_bid) else 100.0
             
-            # Compute rewards for this env
+            # compute rewards for this env
             pnls = []
             for agent_id in range(self.n_agents):
                 agent = self.agents[env_id][agent_id]
                 old_inv, old_cash = initial_states[env_id][agent_id]
                 
-                # Simplified: reward is PnL change
+                # simplified: reward is pnl change
                 pnl_change = (agent.cash - old_cash) + mid * (agent.inventory - old_inv)
                 trade_bonus = 0.1 if (agent.inventory != old_inv) else 0.0
                 inventory_penalty = -0.01 * (abs(agent.inventory) ** 1.5)
                 
                 pnls.append(pnl_change + trade_bonus + inventory_penalty)
             
-            # Mix of absolute and relative rewards
+            # mix of absolute and relative rewards
             mean_pnl = np.mean(pnls)
             rewards = {
                 i: 0.7 * pnls[i] + 0.3 * (pnls[i] - mean_pnl)
                 for i in range(self.n_agents)
             }
             
-            # Check termination
+            # check termination
             terminated = self.step_counts[env_id] >= self.max_steps
             dones = {i: terminated for i in range(self.n_agents)}
             truncs = {i: False for i in range(self.n_agents)}
@@ -156,22 +146,22 @@ class VectorizedMultiAgentEnv(gym.Env):
             truncs_all.append(truncs)
             infos_all.append(infos)
         
-        # Return format depends on n_envs
+        # return format depends on n_envs
         if self.n_envs == 1:
             return obs_all[0], rewards_all[0], dones_all[0], truncs_all[0], infos_all[0]
         else:
             return obs_all, rewards_all, dones_all, truncs_all, infos_all
     
     def _get_obs_all(self):
-        """Get observations for all environments."""
+        # get observations for all environments
         return [self._get_obs(env_id) for env_id in range(self.n_envs)]
     
     def _get_obs(self, env_id: int):
-        """Get observation for one environment."""
+        # get observation for one environment
         book = self.sim.books[env_id]
         depth = book.get_book_depth(levels=5)
         
-        # Parse depth into arrays
+        # parse depth into arrays
         bid_prices = np.zeros(5, dtype=np.float32)
         bid_vols = np.zeros(5, dtype=np.float32)
         ask_prices = np.zeros(5, dtype=np.float32)
@@ -184,11 +174,11 @@ class VectorizedMultiAgentEnv(gym.Env):
             ask_prices[i] = price
             ask_vols[i] = vol
         
-        # Get mid
+        # get mid
         best_bid, best_ask = book.get_best_bid_ask()
         mid = (best_bid + best_ask) / 2 if not np.isnan(best_bid) else 100.0
         
-        # Build observations for each agent
+        # build observations for each agent
         obs_dict = {}
         for agent_id in range(self.n_agents):
             agent = self.agents[env_id][agent_id]
@@ -205,7 +195,7 @@ class VectorizedMultiAgentEnv(gym.Env):
 
 
 class AgentState:
-    """Tracks state for one agent (same as original)."""
+    # tracks state for one agent (same as original)
     def __init__(self, agent_id: int):
         self.agent_id = agent_id
         self.inventory = 0
@@ -219,10 +209,10 @@ class AgentState:
 
 
 def test_vec_env():
-    """Test vectorized environment."""
+    # test vectorized environment
     print("Testing Vectorized Multi-Agent Environment...")
     
-    # Test single env mode (API compatibility)
+    # test single env mode (api compatibility)
     print("\nTest 1: Single environment mode (API compatible)")
     env = VectorizedMultiAgentEnv(n_agents=2, max_steps=10, n_envs=1, device='cpu')
     obs, _ = env.reset(seed=42)
@@ -230,19 +220,19 @@ def test_vec_env():
     print(f"  Observation keys: {obs.keys()}")
     print(f"  Obs shape per agent: {obs[0].shape}")
     
-    # Take a step
+    # take a step
     actions = {0: np.array([0.3, 0.5, 10.0]), 1: np.array([0.7, -0.3, 15.0])}
     obs, rewards, dones, truncs, infos = env.step(actions)
     print(f"✓ Step successful")
     print(f"  Rewards: {rewards}")
     
-    # Test multi-env mode
+    # test multi-env mode
     print("\nTest 2: Multiple environment mode")
     env_multi = VectorizedMultiAgentEnv(n_agents=2, max_steps=10, n_envs=4, device='cpu')
     obs_all, _ = env_multi.reset(seed=42)
     print(f"✓ Reset {len(obs_all)} environments")
     
-    # Take a step
+    # take a step
     actions_batch = [
         {0: np.array([0.3, 0.5, 10.0]), 1: np.array([0.7, -0.3, 15.0])}
         for _ in range(4)
