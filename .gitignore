@@ -2,3 +2,4 @@ pycache/
 /src.rs/target
 *.pyc
 /src/wandb
+/wandb

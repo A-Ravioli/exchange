@@ -47,6 +47,32 @@ class MultiAgentExchangeEnv(gym.Env):
         self.agents = [AgentState(i) for i in range(self.n_agents)]
         self.step_count = 0
         
+        # ADD CONTINUOUS LIQUIDITY PROVIDERS (critical for learning!)
+        from algorithms import RandomTrader, MarketMaker
+        
+        # Add 8 random traders for continuous order flow
+        for i in range(8):
+            RandomTrader(
+                algo_id=800_000 + i,
+                book=self.book,
+                sim=self.sim,
+                seed=(seed + i) if seed else i,
+                interval=0.3,  # trade every 0.3 seconds
+                max_qty=20,
+                price_band=3.0
+            )
+        
+        # Add 3 market makers for continuous liquidity
+        for i in range(3):
+            MarketMaker(
+                algo_id=900_000 + i,
+                book=self.book,
+                sim=self.sim,
+                spread=0.2 + i * 0.1,  # varying spreads (0.2, 0.3, 0.4)
+                size=15,
+                refresh_interval=0.5
+            )
+        
         # seed initial liquidity
         self._seed_liquidity()
         self.sim.run_until(5.0)
@@ -65,7 +91,7 @@ class MultiAgentExchangeEnv(gym.Env):
         self.sim.run_until(self.sim.current_time + 1.0)
         self.step_count += 1
         
-        # calculate rewards (relative performance)
+        # calculate rewards (mix of absolute and relative)
         best_bid, best_ask = get_best_bid_ask(self.book)
         mid = (best_bid + best_ask) / 2 if not np.isnan(best_bid) and not np.isnan(best_ask) else 100.0
         
@@ -73,12 +99,23 @@ class MultiAgentExchangeEnv(gym.Env):
         for i, agent in enumerate(self.agents):
             old_inv, old_cash = initial_states[i]
             pnl_change = (agent.cash - old_cash) + mid * (agent.inventory - old_inv)
-            inventory_penalty = -0.001 * abs(agent.inventory)
-            pnls.append(pnl_change + inventory_penalty)
+            
+            # Encourage trading (prevents "do nothing" strategy)
+            trade_happened = (agent.inventory != old_inv)
+            trade_bonus = 0.1 if trade_happened else 0.0
+            
+            # Penalize excessive inventory (but not too harshly)
+            inventory_penalty = -0.01 * (abs(agent.inventory) ** 1.5)
+            
+            pnls.append(pnl_change + trade_bonus + inventory_penalty)
         
-        # relative rewards (zero-sum competitive)
+        # Mix of absolute (70%) and relative (30%) rewards
+        # This allows agents to profit from background traders while still competing
         mean_pnl = np.mean(pnls)
-        rewards = {i: pnl - mean_pnl for i, pnl in enumerate(pnls)}
+        rewards = {
+            i: 0.7 * pnls[i] + 0.3 * (pnls[i] - mean_pnl)
+            for i in range(len(pnls))
+        }
         
         terminated = self.step_count >= self.max_steps
         truncated = False

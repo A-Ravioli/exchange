@@ -16,12 +16,16 @@ from datetime import datetime
 def train_hybrid(n_rule_agents=2, n_rl_agents=2, n_iterations=10000, use_wandb=True):
     """train rl agents against evolved rule-based agents"""
     
-    # setup device
+    # setup device (mps for apple silicon, cuda for nvidia, cpu fallback)
     if torch.backends.mps.is_available():
         device = torch.device("mps")
         print("using apple mps for acceleration 🚀")
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+        print("using cuda for acceleration 🚀")
     else:
         device = torch.device("cpu")
+        print("using cpu (consider getting a gpu!)")
     
     n_total = n_rule_agents + n_rl_agents
     
@@ -41,8 +45,14 @@ def train_hybrid(n_rule_agents=2, n_rl_agents=2, n_iterations=10000, use_wandb=T
     obs_dim = env.observation_space.shape[0]
     act_dim = env.action_space.shape[0]
     
-    # initialize rule-based agents
-    rule_agents = [RuleBasedAgent() for _ in range(n_rule_agents)]
+    # initialize rule-based agents with diverse starting parameters
+    rule_agents = []
+    for i in range(n_rule_agents):
+        # Start with different initialization strategies
+        agent = RuleBasedAgent()
+        if i > 0:  # mutate the first one to create diversity
+            agent = agent.mutate(0.5)
+        rule_agents.append(agent)
     
     # initialize rl agents
     rl_policies = [PolicyNetwork(obs_dim, act_dim).to(device) for _ in range(n_rl_agents)]

@@ -78,7 +78,8 @@ def train_self_play(n_agents=4, n_iterations=1000, steps_per_iter=500, use_wandb
                 "steps_per_iter": steps_per_iter,
                 "learning_rate": 3e-4,
                 "gamma": 0.99,
-                "device": str(device)
+                "device": str(device),
+                "policy_diversity": True  # new feature
             },
             name=f"selfplay_{n_agents}agents_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         )
@@ -94,6 +95,10 @@ def train_self_play(n_agents=4, n_iterations=1000, steps_per_iter=500, use_wandb
     
     policy_opts = [torch.optim.Adam(p.parameters(), lr=3e-4) for p in policies]
     value_opts = [torch.optim.Adam(v.parameters(), lr=3e-4) for v in values]
+    
+    # Policy pool for diversity (prevents monoculture)
+    import copy
+    policy_pool = []
     
     best_avg_pnl = -float('inf')
     checkpoint_dir = "checkpoints/rl_selfplay"
@@ -208,6 +213,17 @@ def train_self_play(n_agents=4, n_iterations=1000, steps_per_iter=500, use_wandb
         # log progress
         if iteration % 10 == 0:
             print(f"Iter {iteration}: avg_pnl={avg_pnl:.2f}, max_pnl={max_pnl:.2f}, trades={total_trades}")
+        
+        # Add diversity: save best policies to pool every 50 iterations
+        if iteration > 0 and iteration % 50 == 0:
+            best_agent_idx = np.argmax(final_pnls)
+            policy_copy = copy.deepcopy(policies[best_agent_idx])
+            policy_copy.eval()  # set to eval mode
+            policy_pool.append(policy_copy)
+            if len(policy_pool) > 10:  # keep last 10 policies
+                policy_pool.pop(0)
+            if use_wandb:
+                wandb.log({"policy_pool_size": len(policy_pool)})
         
         # save checkpoint (only keep best)
         if avg_pnl > best_avg_pnl:

@@ -78,22 +78,42 @@ class RuleBasedAgent:
 
 
 def evaluate_agent(agent: RuleBasedAgent, n_episodes: int = 5, seed: int = 42) -> float:
-    """run agent in environment and return fitness (average pnl)"""
+    """run agent against background traders and return risk-adjusted fitness"""
     env = MultiAgentExchangeEnv(n_agents=1, max_steps=300)
     
     total_pnl = 0.0
+    total_sharpe = 0.0
+    
     for ep in range(n_episodes):
         obs_all, _ = env.reset(seed=seed + ep)
         done = False
+        episode_rewards = []
         
         while not done:
             action = agent.get_action(obs_all[0])
             obs_all, rewards, dones, _, infos = env.step({0: action})
             done = dones[0]
+            episode_rewards.append(rewards[0])
         
-        total_pnl += infos[0]["pnl"]
+        final_pnl = infos[0]["pnl"]
+        
+        # Calculate Sharpe ratio (risk-adjusted returns)
+        if len(episode_rewards) > 1:
+            mean_reward = np.mean(episode_rewards)
+            std_reward = np.std(episode_rewards)
+            sharpe = mean_reward / (std_reward + 1e-8)
+        else:
+            sharpe = 0.0
+        
+        total_pnl += final_pnl
+        total_sharpe += sharpe
     
-    return total_pnl / n_episodes
+    avg_pnl = total_pnl / n_episodes
+    avg_sharpe = total_sharpe / n_episodes
+    
+    # Fitness = PnL + sharpe bonus (rewards consistent profitable strategies)
+    # The sharpe component prevents "lucky" strategies that just sit still
+    return avg_pnl + 10.0 * avg_sharpe
 
 
 def tournament_select(population: List[RuleBasedAgent], fitnesses: List[float], 
@@ -212,7 +232,8 @@ def compete_agents(agents: List[RuleBasedAgent], n_rounds: int = 10):
         for i in range(len(agents)):
             scores[i] += infos[i]["pnl"]
         
-        print(f"Round {round_num}: PnLs = {[f'{infos[i]["pnl"]:.2f}' for i in range(len(agents))]}")
+        pnls_str = [f'{infos[i]["pnl"]:.2f}' for i in range(len(agents))]
+        print(f"Round {round_num}: PnLs = {pnls_str}")
     
     print(f"\nFinal scores: {[f'{s/n_rounds:.2f}' for s in scores]}")
     return scores

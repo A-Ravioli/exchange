@@ -1,0 +1,6 @@
+numpy>=1.24.0
+sortedcontainers>=2.4.0
+gymnasium>=0.28.0
+torch>=2.0.0
+wandb>=0.15.0
+modal>=0.64.0
