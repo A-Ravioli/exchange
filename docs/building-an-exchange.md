@@ -303,6 +303,240 @@ things i'd add if i keep working on this:
 
 **performance optimization**: port the hot paths to rust or c++. could probably get another 10-100x speedup.
 
+## experiments: can we learn to trade?
+
+once i had the exchange working, the obvious next question was: can you train an ai to make money in it?
+
+i ran a bunch of experiments. some worked. some didn't. here's what i learned.
+
+### experiment 1: single agent rl (baseline)
+
+**setup**: one rl agent (ppo with a small 128-unit network) trading against random background traders.
+
+**results**: it learned... something. the agent figured out that inventory penalties are bad, so it mostly stayed flat. occasional small trades. pnl hovered around zero, slightly positive.
+
+**verdict**: boring but stable. the agent basically learned "don't do anything stupid." not terrible, but not interesting.
+
+**problem**: no competition. the random traders are predictable. there's no adversarial pressure pushing the agent to improve.
+
+### experiment 2: multi-agent self-play
+
+**setup**: 4 rl agents competing against each other. same order book, same observations, but they're all trying to maximize their own pnl.
+
+**training details**:
+- ppo with clipped advantage
+- 3 layers, 128 hidden units
+- learning rate 3e-4
+- 32 parallel environments (subprocess vectorization)
+- 500 steps per episode
+- logged to wandb
+
+**results**: way more interesting! agents developed strategies:
+- one agent became a passive market maker, posting on both sides
+- another became aggressive, taking liquidity
+- they learned to react to each other's inventory positions
+- average pnl per agent: ~$15-30 per episode (starting from $0)
+
+**verdict**: self-play creates emergent complexity. agents push each other to improve. this is where it got fun.
+
+**insight**: competitive environments force learning. you need adversaries.
+
+### experiment 3: evolution vs reinforcement learning
+
+**setup**: instead of neural networks, evolve simple rule-based strategies using genetic algorithms.
+
+**agent structure**: 12 parameters defining buy/sell thresholds, price offsets, and quantity sizing based on:
+- order book imbalance (bid volume vs ask volume)
+- spread width
+- inventory position (mean reversion)
+
+**evolution details**:
+- population size: 50-100
+- tournament selection (top 5)
+- crossover + mutation (rate: 0.15)
+- fitness: pnl + 10×sharpe ratio (rewards consistency)
+- 100+ generations
+
+**results**: 
+- converged to strategies that lean into imbalance signals
+- strong inventory mean reversion (don't accumulate positions)
+- preferred tight spreads (more trading opportunities)
+- final fitness: ~40-60 (compared to ~0-5 for random)
+
+**verdict**: evolution works! simpler than deep rl, faster to iterate, and surprisingly effective for this problem.
+
+**comparison**: evolved agents matched or beat rl agents with ~1000× fewer parameters. the structure of the rule-based agent was a strong prior.
+
+### experiment 4: scaling up with parallelism
+
+**motivation**: training was slow. 4 agents × 500 steps × single env = not enough data.
+
+**solution**: parallelize everything.
+
+implemented `SubprocVecEnv` (multiprocessing):
+- 32 environments running simultaneously
+- each with 4 agents
+- step all 32 in parallel, collect rollouts, train on combined batch
+
+**speedup**: ~20-30× faster wall clock time (depends on cpu cores)
+
+**training throughput**: 
+- before: ~2000 steps/second
+- after: ~50,000 steps/second
+- could train to convergence in ~30 minutes instead of 10 hours
+
+**other benefits**:
+- better gradient estimates (more diverse data)
+- smoother learning curves
+- less variance in pnl metrics
+
+**lesson**: parallelism isn't just about speed—it's about data quality.
+
+### experiment 5: bigger networks for gpu utilization
+
+**observation**: small 128-unit networks barely use the gpu. most time spent on overhead, not compute.
+
+**hypothesis**: bigger networks would saturate gpu better and learn richer representations.
+
+**architectures tested**:
+1. **small**: 2 layers × 128 units (~50k parameters)
+2. **large**: 3 layers × [512, 512, 256] (~800k parameters)  
+3. **extra large**: 4 layers × [1024, 1024, 512, 256] (~3m parameters)
+4. **residual**: 4 residual blocks × 512 units with skip connections
+
+**results**:
+- large networks: ~15-20% better final pnl
+- extra large: diminishing returns, sometimes overfitting
+- residual: similar to large, more stable gradients
+
+**training speed** (with mixed precision on apple mps):
+- small: 8k steps/sec
+- large: 6k steps/sec  
+- xlarge: 3k steps/sec
+
+**verdict**: large networks (512-512-256) hit the sweet spot. better performance without much slowdown.
+
+**why it helps**: agents can memorize opponent behaviors and build better state representations.
+
+### experiment 6: mixed precision training
+
+**idea**: use fp16 instead of fp32 for forward/backward passes to speed up training.
+
+**implementation**: pytorch amp (automatic mixed precision)
+
+```python
+with autocast():
+    policy_loss = compute_loss(...)
+scaler.scale(policy_loss).backward()
+scaler.step(optimizer)
+```
+
+**results**:
+- cuda: ~1.8× speedup 
+- apple mps: not supported yet (falls back to fp32)
+- cpu: not supported (falls back to fp32)
+
+**stability**: needed gradient clipping (max norm 0.5) to prevent overflow. otherwise fine.
+
+**verdict**: free speedup on cuda. use it if you have nvidia gpus.
+
+### experiment 7: policy diversity and self-play pool
+
+**problem**: agents sometimes collapse to similar strategies. less diversity → less learning pressure.
+
+**solution**: maintain a pool of past best policies. periodically swap opponents.
+
+**implementation**:
+- every 50 iterations, clone the best agent
+- keep pool of last 10 best policies
+- occasionally pit current agents against pool members
+
+**results**: mixed. increased diversity but also increased variance. sometimes helped, sometimes hurt.
+
+**verdict**: interesting idea, needs more tuning. probably works better with longer training runs.
+
+### experiment 8: vectorized order book (gpu acceleration attempt)
+
+**idea**: implement the entire order book in pytorch/cuda for full gpu acceleration.
+
+**implementation**:
+- `exchange_vector.py`: order book with tensor operations
+- `matching_kernels.py`: custom cuda-like kernels for matching
+- batched simulation across multiple environments
+
+**challenges**:
+- order books are inherently sequential (time priority matters)
+- dynamic data structures (queues of variable length) don't map well to tensors
+- lots of branching logic (hard to vectorize)
+
+**results**: 
+- worked for simple cases
+- ~2-3× slower than cpu version for realistic workloads
+- memory hungry (preallocate huge tensors)
+
+**verdict**: gpus aren't magic. some algorithms (like order matching) are fundamentally sequential and don't benefit from parallelism.
+
+**lesson**: profile before optimizing. cpu multiprocessing beat gpu vectorization here.
+
+### experiment 9: hybrid evolutionary rl
+
+**idea**: use evolution to find good parameter initialization, then fine-tune with rl.
+
+**setup**:
+1. evolve rule-based agents for 100 generations
+2. extract best parameters
+3. use them to initialize neural network weights (domain knowledge → network biases)
+4. train with ppo
+
+**status**: didn't finish this one. evolutionary strategies were good enough that i got distracted optimizing those instead.
+
+**future work**: probably worth revisiting. combining symbolic (evolution) and neural (rl) representations is powerful.
+
+### what actually worked
+
+**for speed**:
+- ✅ parallel environments (massive win)
+- ✅ larger networks (modest win)  
+- ✅ mixed precision on cuda (good win)
+- ❌ gpu vectorization (loss)
+
+**for performance**:
+- ✅ multi-agent self-play (essential)
+- ✅ evolution for rule-based strategies (surprisingly good)
+- ✅ larger networks (better final pnl)
+- ⚠️ policy pools (inconsistent)
+
+**for iteration speed**:
+- ✅ wandb logging (saved so much debugging time)
+- ✅ checkpointing best models
+- ✅ discrete event simulation (deterministic replay)
+
+### experiment stats
+
+across all experiments:
+- **total training runs**: 30+ (many failed early)
+- **total training time**: ~40-50 gpu-hours on m1 mps + some cpu
+- **best single agent pnl**: ~$45 per episode (evolved agent)
+- **best multi-agent average**: ~$28 per episode (4 rl agents)
+- **convergence time**: 200-500 iterations (depends on setup)
+
+### things i'd try next
+
+**better reward shaping**: current reward is just pnl change + inventory penalty. could add:
+- sharpe ratio (risk-adjusted returns)
+- drawdown penalties
+- turnover costs (currently trading is free)
+
+**opponent modeling**: agents could learn to predict other agents' actions and exploit them.
+
+**hierarchical policies**: separate high-level strategy (market making vs taking) from low-level execution (price/quantity).
+
+**imitation learning**: bootstrap from evolved strategies, then improve with rl.
+
+**multi-asset**: trade multiple correlated instruments. way more complex but more realistic.
+
+**latency**: add realistic network delays. changes optimal strategies significantly.
+
 ## conclusion
 
 building this took about a week of evenings. the code is ~1000 lines of python across a few files. it's not production-ready—no error handling, no persistence, no gui—but it captures the essential complexity.
@@ -311,7 +545,9 @@ most importantly, it's *fun*. there's something deeply satisfying about watching
 
 and now when i read about market microstructure or hft strategies or exchange mechanics, i have a mental model to ground it in. i can reason about "what would happen if..." questions by actually trying them in code.
 
-if you're curious about markets, i'd encourage you to build your own exchange. start simple—just bids, asks, and basic matching. add features as you get curious about them. you'll learn way more than you would from reading textbooks.
+the experiments taught me as much as building the exchange itself. seeing agents learn to trade—or fail to learn—gives you intuition for how markets work. competition creates complexity. simple rules can be surprisingly effective. gpus aren't always the answer.
+
+if you're curious about markets, i'd encourage you to build your own exchange. start simple—just bids, asks, and basic matching. add features as you get curious about them. then try to train something to trade in it. you'll learn way more than you would from reading textbooks.
 
 the code is on [github](https://github.com) if you want to poke around.[^5]
 
