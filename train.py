@@ -12,8 +12,8 @@ import copy
 # import from src
 from src.parallel_env import ParallelEnv
 from src.multi_agent_env import MultiAgentExchangeEnv
-from src.networks import LargePolicyNetwork, LargeValueNetwork, PolicyNetwork
-from src.evolve import RuleBasedAgent, evolve_population
+from src.networks import LargePolicyNetwork, LargeValueNetwork, PolicyNetwork, ValueNetwork
+from src.evolve import RuleBasedAgent, evolve_strategies
 
 import wandb
 
@@ -87,7 +87,7 @@ def train_rl(
         values = [LargeValueNetwork(obs_dim).to(device) for _ in range(n_agents)]
     else:
         policies = [PolicyNetwork(obs_dim, act_dim).to(device) for _ in range(n_agents)]
-        values = [PolicyNetwork(obs_dim, 1).to(device) for _ in range(n_agents)]
+        values = [ValueNetwork(obs_dim).to(device) for _ in range(n_agents)]
     
     policy_opts = [torch.optim.Adam(p.parameters(), lr=3e-4) for p in policies]
     value_opts = [torch.optim.Adam(v.parameters(), lr=3e-4) for v in values]
@@ -352,8 +352,7 @@ def main():
     if args.mode == 'evolution':
         # run evolution instead of rl
         env = MultiAgentExchangeEnv(n_agents=args.n_agents, max_steps=args.steps_per_iter)
-        population = evolve_population(
-            env=env,
+        population = evolve_strategies(
             pop_size=args.n_agents * 4,
             n_generations=args.n_iterations,
             use_wandb=not args.no_wandb

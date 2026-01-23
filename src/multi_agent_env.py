@@ -5,8 +5,8 @@ from typing import Dict, List
 import gymnasium as gym
 from gymnasium import spaces
 
-from exchange import init_exchange, submit_order, get_best_bid_ask, get_book_depth, Order
-from sim import init_sim
+from src.exchange import init_exchange, submit_order, get_best_bid_ask, get_book_depth, Order
+from src.sim import init_sim
 
 # multi-agent competitive environment for discovering trading strategies
 
@@ -48,7 +48,7 @@ class MultiAgentExchangeEnv(gym.Env):
         self.step_count = 0
         
         # ADD CONTINUOUS LIQUIDITY PROVIDERS (critical for learning!)
-        from algorithms import RandomTrader, MarketMaker
+        from src.algorithms import RandomTrader, MarketMaker
         
         # Add 8 random traders for continuous order flow
         for i in range(8):
@@ -113,7 +113,7 @@ class MultiAgentExchangeEnv(gym.Env):
         # This allows agents to profit from background traders while still competing
         mean_pnl = np.mean(pnls)
         rewards = {
-            i: 0.7 * pnls[i] + 0.3 * (pnls[i] - mean_pnl)
+            i: np.clip(0.7 * pnls[i] + 0.3 * (pnls[i] - mean_pnl), -100, 100)
             for i in range(len(pnls))
         }
         
@@ -202,16 +202,23 @@ class MultiAgentExchangeEnv(gym.Env):
         best_bid, best_ask = get_best_bid_ask(self.book)
         mid = (best_bid + best_ask) / 2 if not np.isnan(best_bid) and not np.isnan(best_ask) else 100.0
         
-        # own state
+        # own state (normalize cash to prevent explosion)
         agent = self.agents[agent_id]
-        own_state = [agent.inventory, agent.cash]
+        own_state = [
+            np.clip(agent.inventory, -100, 100),  # clip inventory
+            np.clip(agent.cash / 1000.0, -100, 100)  # normalize and clip cash
+        ]
         
         # other agents' inventories (partial observability)
-        other_invs = [self.agents[i].inventory for i in range(self.n_agents)]
+        other_invs = [np.clip(self.agents[i].inventory, -100, 100) for i in range(self.n_agents)]
         
         obs = np.concatenate([
             bid_prices, bid_vols, ask_prices, ask_vols, own_state, other_invs
-        ]).astype(np.float32)
+        ])
+        
+        # Final safety: replace any inf/nan and clip to reasonable range
+        obs = np.nan_to_num(obs, nan=0.0, posinf=100.0, neginf=-100.0)
+        obs = np.clip(obs, -1000, 1000).astype(np.float32)
         
         return obs
 

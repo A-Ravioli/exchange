@@ -2,7 +2,7 @@
 """evolutionary strategies for trading agents"""
 
 import numpy as np
-from multi_agent_env import MultiAgentExchangeEnv
+from src.multi_agent_env import MultiAgentExchangeEnv
 from typing import List, Tuple
 import wandb
 import os

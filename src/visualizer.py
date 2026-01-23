@@ -4,7 +4,7 @@ from typing import List
 import math
 import sys
 
-from exchange import TradeEvent, get_best_bid_ask, get_book_depth, get_mid_price, get_spread
+from src.exchange import TradeEvent, get_best_bid_ask, get_book_depth, get_mid_price, get_spread
 
 # terminal visualization for the order book
 

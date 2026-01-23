@@ -5,7 +5,7 @@ from typing import Callable, Dict, List, Optional
 import math
 import random
 
-from exchange import (
+from src.exchange import (
     BookUpdateEvent,
     Order,
     OrderExecutedEvent,
@@ -14,7 +14,7 @@ from exchange import (
     get_mid_price,
     submit_order,
 )
-from sim import Simulation
+from src.sim import Simulation
 
 # interface fortrading algorithms that interact with the exchange
 

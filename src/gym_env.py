@@ -4,9 +4,9 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
-from exchange import init_exchange, submit_order, get_best_bid_ask, get_book_depth, Order
-from sim import init_sim
-from algorithms import RandomTrader
+from src.exchange import init_exchange, submit_order, get_best_bid_ask, get_book_depth, Order
+from src.sim import init_sim
+from src.algorithms import RandomTrader
 
 # minimal gym wrapper for the exchange
 

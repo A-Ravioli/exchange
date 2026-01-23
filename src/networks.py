@@ -8,6 +8,58 @@ import torch.nn as nn
 from torch.distributions import Normal
 
 
+class PolicyNetwork(nn.Module):
+    """
+    Simple policy network with 2 hidden layers (128, 128).
+    Fallback for when 'small' network size is specified.
+    """
+    
+    def __init__(self, obs_dim: int, act_dim: int, hidden=128):
+        super().__init__()
+        
+        self.net = nn.Sequential(
+            nn.Linear(obs_dim, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, hidden),
+            nn.ReLU()
+        )
+        self.mean = nn.Linear(hidden, act_dim)
+        self.log_std = nn.Parameter(torch.zeros(act_dim))
+    
+    def forward(self, obs):
+        h = self.net(obs)
+        mean = self.mean(h)
+        std = torch.exp(self.log_std).expand_as(mean)
+        return Normal(mean, std)
+    
+    def act(self, obs, deterministic=False):
+        """Sample action from policy."""
+        dist = self.forward(obs)
+        action = dist.mean if deterministic else dist.sample()
+        log_prob = dist.log_prob(action).sum(-1)
+        return action, log_prob
+
+
+class ValueNetwork(nn.Module):
+    """
+    Simple value network matching small policy network.
+    """
+    
+    def __init__(self, obs_dim: int, hidden=128):
+        super().__init__()
+        
+        self.net = nn.Sequential(
+            nn.Linear(obs_dim, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, 1)
+        )
+    
+    def forward(self, obs):
+        return self.net(obs).squeeze(-1)
+
+
 class LargePolicyNetwork(nn.Module):
     """
     Large policy network with 3 hidden layers (512, 512, 256).
