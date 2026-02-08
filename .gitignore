@@ -3,3 +3,4 @@ pycache/
 *.pyc
 /src/wandb
 /wandb
+.DS_Store
