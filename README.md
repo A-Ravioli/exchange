@@ -1,6 +1,6 @@
 # exchange
 
-i made clones of the NYSE and CME, originally for a research project with the very fun people at UMass Amherst's Quantum Information Theory lab, and am now open-sourcing it.
+i made clones of the NYSE and CME, originally for a research project with the very awesome geniuses at UMass Amherst's Quantum Information Theory lab, and am now open-sourcing it.
 
 i built the original version in julia kinda quickly over a weekend, but julia kinda sucks as a language so we're rebuilding it in python so that more people can use it and so that i can wrap it in a gymnasium environment for some cool rl/ml natural HFT/MFT strategy discovery experiments which i show off in the experiments section!
 
