@@ -50,9 +50,8 @@ docs/                   # documentation
 # quick start
 
 run a basic simulation:
-```bash
-cd src
-python -c "
+```python
+# cd into src
 from exchange import init_exchange
 from sim import init_sim
 from algorithms import RandomTrader, MarketMaker
@@ -69,7 +68,6 @@ sim.run_until(100.0)
 # visualize the book
 from visualizer import visualize_book
 visualize_book(book)
-"
 ```
 
 # making this a gym environment
