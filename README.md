@@ -25,11 +25,8 @@ src/                    # core python implementation
     evolve.py           # evolutionary strategies for discovering trading rules
     test_*.py           # tests
 
-src.vector/             # gpu-accelerated vectorized implementation
-    exchange_vector.py  # vectorized order book using pytorch tensors
-    vec_env.py          # vectorized multi-agent environment
-    batch_sim.py        # batched simulation for parallel training
-    matching_kernels.py # optimized matching algorithms
+src/vector/             # batched tensor training environment
+    env.py              # simplified vectorized multi-agent rl simulator
 
 src.jl/                 # original version in julia
 
@@ -44,7 +41,6 @@ examples/               # usage examples
 
 docs/                   # documentation
     building-an-exchange.md  # walkthrough of how this was built
-    strategy-discovery.md    # guide to rl and evolution experiments
 ```
 
 # quick start
@@ -94,25 +90,33 @@ env.render()  # shows the order book + your position
 use the consolidated training script for all modes:
 
 ```bash
-# rl training with all optimizations (default)
-python train.py --mode rl --n_agents 4 --n_iterations 1000 --n_envs 32
+# rl training with multiprocessing environments (default)
+python3 train.py --mode rl --n_agents 4 --n_iterations 1000 --n_envs 32
+
+# rl training with the simplified vectorized training simulator
+python3 train.py --mode rl --env vector --device auto --n_agents 4 --n_iterations 1000 --n_envs 64
+
+# kolmogorov-arnold network policy/value networks via PyKAN
+python3 train.py --mode rl --env vector --network_size kan --n_envs 64 --n_iterations 20 --steps_per_iter 32
 
 # evolutionary strategies
-python train.py --mode evolution --n_agents 8 --n_iterations 500
+python3 train.py --mode evolution --n_agents 8 --n_iterations 500
 
 # hybrid mode (rl + evolution)
-python train.py --mode hybrid --n_agents 4 --n_iterations 1000
+python3 train.py --mode hybrid --n_agents 4 --n_iterations 1000
 
 # options
-python train.py --help
+python3 train.py --help
 ```
 
 the training script includes:
 - parallel environments for faster data collection
 - larger neural networks for better capacity
+- optional Kolmogorov-Arnold Networks through PyKAN
 - mixed precision training (cuda only)
 - mini-batch ppo with multiple epochs
 - wandb integration for logging
+- optional vectorized training backend optimized for apple mps/cuda/cpu
 
 ## what strategies emerge?
 
@@ -141,10 +145,10 @@ the multi-agent environment forces agents to compete, so they evolve strategies 
 - runs way faster than real time (~500k events/sec in python)
 
 **vectorized implementation:**
-- gpu-accelerated order book using pytorch tensors
-- 50-100x speedup over regular python
-- batch processing of multiple orders
-- parallel environment execution
+- simplified rl training simulator using batched pytorch tensors
+- one tensor book across many environments
+- background liquidity and market flow for dense learning signals
+- benchmark with `python3 scripts/benchmark_envs.py`
 
 **strategy discovery:**
 - evolutionary strategies (genetic algorithms)
@@ -155,18 +159,17 @@ the multi-agent environment forces agents to compete, so they evolve strategies 
 # docs
 
 - [building an exchange](docs/building-an-exchange.md) - walks through how i built this from first principles
-- [strategy discovery](docs/strategy-discovery.md) - guide to the rl and evolution experiments
 
 # dependencies
 
 ```bash
-pip install numpy sortedcontainers gymnasium torch wandb
+pip install numpy sortedcontainers gymnasium torch wandb cloudpickle
 ```
 
 # performance
 
 - python: ~500k events/sec (m1 mac)
-- vectorized (gpu): 50-100x faster with batching
+- vectorized: benchmark locally with `python3 scripts/benchmark_envs.py`
 
 # license
 it's MIT licensed. don't do anything weird. the license is in [LICENSE](LICENSE)

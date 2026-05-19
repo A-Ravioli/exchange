@@ -4,18 +4,32 @@
 import argparse
 import numpy as np
 import torch
-import torch.nn as nn
 from torch.cuda.amp import autocast, GradScaler
 from datetime import datetime
 import os
-import copy
-# import from src
-from src.parallel_env import ParallelEnv
-from src.multi_agent_env import MultiAgentExchangeEnv
-from src.networks import LargePolicyNetwork, LargeValueNetwork, PolicyNetwork, ValueNetwork
-from src.evolve import RuleBasedAgent, evolve_strategies
+from src.networks import (
+    KANPolicyNetwork,
+    KANValueNetwork,
+    LargePolicyNetwork,
+    LargeValueNetwork,
+    PolicyNetwork,
+    ValueNetwork,
+)
+from src.vector import VectorizedMultiAgentEnv, select_device
 
-import wandb
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+os.environ.setdefault("XDG_CACHE_HOME", "/tmp/xdg-cache")
+
+
+def _wandb():
+    import wandb
+    return wandb
+
+
+def _as_numpy(value):
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().numpy()
+    return np.asarray(value)
 
 
 def train_rl(
@@ -28,7 +42,10 @@ def train_rl(
     ppo_epochs=20,
     use_mixed_precision=True,
     mini_batch_size=256,
-    mode='rl'  # 'rl', 'evolution', or 'hybrid'
+    mode='rl',  # 'rl', 'evolution', or 'hybrid'
+    env_type='parallel',
+    device_name='auto',
+    resume_checkpoint=None,
 ):
     """
     unified training function with all optimizations
@@ -38,21 +55,19 @@ def train_rl(
     - mini-batch ppo
     """
     
-    # setup device
-    if torch.backends.mps.is_available():
-        device = torch.device("mps")
-        print("using apple mps for acceleration 🚀")
-        use_mixed_precision = False  # mps doesn't support amp yet
-    elif torch.cuda.is_available():
-        device = torch.device("cuda")
-        print("using cuda for acceleration 🚀")
+    device = select_device(device_name)
+    if device.type == "mps":
+        print("using apple mps for acceleration")
+    elif device.type == "cuda":
+        print("using cuda for acceleration")
     else:
-        device = torch.device("cpu")
         print("using cpu")
+    if device.type != "cuda":
         use_mixed_precision = False
     
     # initialize wandb
     if use_wandb:
+        wandb = _wandb()
         wandb.init(
             project=f"exchange-{mode}",
             config={
@@ -66,17 +81,29 @@ def train_rl(
                 "device": str(device),
                 "network_size": network_size,
                 "mixed_precision": use_mixed_precision,
-                "mode": mode
+                "mode": mode,
+                "env_type": env_type,
             },
-            name=f"{mode}_{n_envs}envs_{network_size}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            name=f"{mode}_{env_type}_{n_envs}envs_{network_size}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         )
     
-    # create parallel environments
-    env_fns = [
-        lambda: MultiAgentExchangeEnv(n_agents=n_agents, max_steps=steps_per_iter)
-        for _ in range(n_envs)
-    ]
-    par_env = ParallelEnv(env_fns, n_envs=n_envs)
+    if env_type == "vector":
+        par_env = VectorizedMultiAgentEnv(
+            n_agents=n_agents,
+            max_steps=steps_per_iter,
+            n_envs=n_envs,
+            device=str(device),
+            return_tensors=True,
+        )
+    else:
+        from src.parallel_env import ParallelEnv
+        from src.multi_agent_env import MultiAgentExchangeEnv
+
+        env_fns = [
+            lambda: MultiAgentExchangeEnv(n_agents=n_agents, max_steps=steps_per_iter)
+            for _ in range(n_envs)
+        ]
+        par_env = ParallelEnv(env_fns, n_envs=n_envs)
     
     obs_dim = par_env.observation_space.shape[0]
     act_dim = par_env.action_space.shape[0]
@@ -85,6 +112,9 @@ def train_rl(
     if network_size == 'large':
         policies = [LargePolicyNetwork(obs_dim, act_dim).to(device) for _ in range(n_agents)]
         values = [LargeValueNetwork(obs_dim).to(device) for _ in range(n_agents)]
+    elif network_size == 'kan':
+        policies = [KANPolicyNetwork(obs_dim, act_dim).to(device) for _ in range(n_agents)]
+        values = [KANValueNetwork(obs_dim).to(device) for _ in range(n_agents)]
     else:
         policies = [PolicyNetwork(obs_dim, act_dim).to(device) for _ in range(n_agents)]
         values = [ValueNetwork(obs_dim).to(device) for _ in range(n_agents)]
@@ -95,22 +125,32 @@ def train_rl(
     # mixed precision scaler
     scaler = GradScaler() if use_mixed_precision else None
     
-    # policy pool for diversity
-    policy_pool = []
-    
     best_avg_pnl = -float('inf')
+    start_iteration = 0
     checkpoint_dir = f"checkpoints/{mode}"
     os.makedirs(checkpoint_dir, exist_ok=True)
+
+    if resume_checkpoint:
+        checkpoint = torch.load(resume_checkpoint, map_location=device, weights_only=False)
+        for policy, state in zip(policies, checkpoint["policies"]):
+            policy.load_state_dict(state)
+        for value, state in zip(values, checkpoint["values"]):
+            value.load_state_dict(state)
+        best_avg_pnl = float(checkpoint.get("avg_pnl", best_avg_pnl))
+        start_iteration = int(checkpoint.get("iteration", -1)) + 1
+        print(f"resumed from {resume_checkpoint} at iteration {start_iteration}")
     
     print(f"\n🚀 starting {mode} training:")
-    print(f"   {n_envs} parallel environments")
+    print(f"   {n_envs} {env_type} environments")
     print(f"   {network_size} networks")
     print(f"   {ppo_epochs} ppo epochs")
     print(f"   mixed precision: {use_mixed_precision}\n")
     
     for iteration in range(n_iterations):
+        global_iteration = start_iteration + iteration
         # collect rollouts from all parallel environments
-        obs_all = par_env.reset(seed=iteration)
+        reset_result = par_env.reset(seed=global_iteration)
+        obs_all = reset_result[0] if isinstance(reset_result, tuple) else reset_result
         
         # trajectories for each agent, across all envs
         trajectories = [[[] for _ in range(n_envs)] for _ in range(n_agents)]
@@ -120,7 +160,7 @@ def train_rl(
             actions_per_agent = {}
             
             for agent_id in range(n_agents):
-                obs_tensor = torch.FloatTensor(obs_all[agent_id]).to(device)
+                obs_tensor = torch.as_tensor(obs_all[agent_id], dtype=torch.float32, device=device)
                 
                 with torch.no_grad():
                     if use_mixed_precision:
@@ -129,30 +169,35 @@ def train_rl(
                     else:
                         action, log_prob = policies[agent_id].act(obs_tensor)
                 
-                actions_per_agent[agent_id] = action.cpu().numpy()
+                actions_per_agent[agent_id] = action if env_type == "vector" else action.cpu().numpy()
                 
                 for env_id in range(n_envs):
                     trajectories[agent_id][env_id].append({
-                        'obs': obs_all[agent_id][env_id],
+                        'obs': _as_numpy(obs_all[agent_id][env_id]),
                         'action': action[env_id].cpu(),
                         'log_prob': log_prob[env_id].cpu()
                     })
             
-            # convert to list of dicts (one dict per env)
-            actions_list = []
-            for env_id in range(n_envs):
-                env_actions = {
-                    agent_id: actions_per_agent[agent_id][env_id]
-                    for agent_id in range(n_agents)
-                }
-                actions_list.append(env_actions)
+            if env_type == "vector":
+                actions_for_env = actions_per_agent
+            else:
+                # convert to list of dicts (one dict per env)
+                actions_for_env = []
+                for env_id in range(n_envs):
+                    env_actions = {
+                        agent_id: actions_per_agent[agent_id][env_id]
+                        for agent_id in range(n_agents)
+                    }
+                    actions_for_env.append(env_actions)
             
-            obs_all, rewards, dones, truncs, infos = par_env.step(actions_list)
+            obs_all, rewards, dones, truncs, infos = par_env.step(actions_for_env)
             
             for agent_id in range(n_agents):
+                rewards_np = _as_numpy(rewards[agent_id])
                 for env_id in range(n_envs):
-                    trajectories[agent_id][env_id][-1]['reward'] = rewards[agent_id][env_id]
-                    episode_rewards[agent_id][env_id] += rewards[agent_id][env_id]
+                    reward_value = float(rewards_np[env_id])
+                    trajectories[agent_id][env_id][-1]['reward'] = reward_value
+                    episode_rewards[agent_id][env_id] += reward_value
         
         # training loop with mini-batch ppo
         policy_losses = []
@@ -273,7 +318,7 @@ def train_rl(
         # log to wandb
         if use_wandb:
             wandb.log({
-                "iteration": iteration,
+                "iteration": global_iteration,
                 "avg_pnl": avg_pnl,
                 "max_pnl": max_pnl,
                 "min_pnl": np.min(final_pnls),
@@ -283,28 +328,15 @@ def train_rl(
             })
         
         # log progress
-        if iteration % 10 == 0:
-            print(f"iter {iteration}: avg_pnl={avg_pnl:.2f}, max_pnl={max_pnl:.2f}")
-        
-        # policy diversity
-        if iteration > 0 and iteration % 50 == 0:
-            best_agent_idx = np.argmax(final_pnls)
-            policy_copy = copy.deepcopy(policies[best_agent_idx])
-            policy_copy.eval()
-            policy_pool.append(policy_copy)
-            if len(policy_pool) > 10:
-                policy_pool.pop(0)
+        if global_iteration % 10 == 0:
+            print(f"iter {global_iteration}: avg_pnl={avg_pnl:.2f}, max_pnl={max_pnl:.2f}")
         
         # save checkpoint
         if avg_pnl > best_avg_pnl:
             best_avg_pnl = avg_pnl
-            for f in os.listdir(checkpoint_dir):
-                if f.startswith("policies_"):
-                    os.remove(os.path.join(checkpoint_dir, f))
-            
-            checkpoint_path = os.path.join(checkpoint_dir, f"policies_iter_{iteration}_pnl_{avg_pnl:.2f}.pt")
+            checkpoint_path = os.path.join(checkpoint_dir, f"policies_iter_{global_iteration}_pnl_{avg_pnl:.2f}.pt")
             torch.save({
-                'iteration': iteration,
+                'iteration': global_iteration,
                 'policies': [p.state_dict() for p in policies],
                 'values': [v.state_dict() for v in values],
                 'avg_pnl': avg_pnl,
@@ -312,7 +344,9 @@ def train_rl(
                     'n_envs': n_envs,
                     'network_size': network_size,
                     'ppo_epochs': ppo_epochs,
-                    'mixed_precision': use_mixed_precision
+                    'mixed_precision': use_mixed_precision,
+                    'env_type': env_type,
+                    'device': str(device),
                 }
             }, checkpoint_path)
             print(f"💾 saved checkpoint: {checkpoint_path}")
@@ -320,6 +354,7 @@ def train_rl(
     par_env.close()
     
     if use_wandb:
+        wandb = _wandb()
         wandb.finish()
     
     return policies
@@ -333,12 +368,18 @@ def main():
     parser.add_argument('--n_iterations', type=int, default=1000, help='training iterations')
     parser.add_argument('--steps_per_iter', type=int, default=500, help='steps per iteration')
     parser.add_argument('--n_envs', type=int, default=32, help='parallel environments')
-    parser.add_argument('--network_size', type=str, default='large', choices=['small', 'large'],
+    parser.add_argument('--env', type=str, default='parallel', choices=['parallel', 'vector'],
+                        help='environment backend (default: parallel)')
+    parser.add_argument('--device', type=str, default='auto', choices=['auto', 'mps', 'cuda', 'cpu'],
+                        help='torch device for networks and vector env')
+    parser.add_argument('--network_size', type=str, default='large', choices=['small', 'large', 'kan'],
                         help='network size')
     parser.add_argument('--ppo_epochs', type=int, default=20, help='ppo epochs')
     parser.add_argument('--mini_batch_size', type=int, default=256, help='mini batch size')
     parser.add_argument('--no_wandb', action='store_true', help='disable wandb logging')
     parser.add_argument('--no_mixed_precision', action='store_true', help='disable mixed precision')
+    parser.add_argument('--resume_checkpoint', type=str, default=None,
+                        help='checkpoint to resume policies and values from')
     
     args = parser.parse_args()
     
@@ -346,11 +387,16 @@ def main():
     print(f"   agents: {args.n_agents}")
     print(f"   iterations: {args.n_iterations}")
     print(f"   parallel envs: {args.n_envs}")
+    print(f"   env backend: {args.env}")
+    print(f"   device: {args.device}")
     print(f"   network: {args.network_size}")
     print()
     
     if args.mode == 'evolution':
         # run evolution instead of rl
+        from src.multi_agent_env import MultiAgentExchangeEnv
+        from src.evolve import evolve_strategies
+
         env = MultiAgentExchangeEnv(n_agents=args.n_agents, max_steps=args.steps_per_iter)
         population = evolve_strategies(
             pop_size=args.n_agents * 4,
@@ -369,7 +415,10 @@ def main():
             ppo_epochs=args.ppo_epochs,
             use_mixed_precision=not args.no_mixed_precision,
             mini_batch_size=args.mini_batch_size,
-            mode=args.mode
+            mode=args.mode,
+            env_type=args.env,
+            device_name=args.device,
+            resume_checkpoint=args.resume_checkpoint,
         )
         print("\n✅ rl training complete!")
 

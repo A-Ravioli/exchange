@@ -3,6 +3,7 @@ Enhanced network architectures for better GPU utilization.
 Larger networks with more parameters to saturate GPU compute.
 """
 
+import os
 import torch
 import torch.nn as nn
 from torch.distributions import Normal
@@ -116,6 +117,68 @@ class LargeValueNetwork(nn.Module):
     
     def forward(self, obs):
         return self.net(obs).squeeze(-1)
+
+
+class KANPolicyNetwork(nn.Module):
+    """
+    Kolmogorov-Arnold Network policy trunk using PyKAN.
+
+    Observations are layer-normalized and squashed into PyKAN's default
+    [-1, 1] grid range before the spline trunk.
+    """
+
+    def __init__(self, obs_dim: int, act_dim: int, hidden: int = 16, grid: int = 3, k: int = 3):
+        super().__init__()
+        os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+        os.environ.setdefault("XDG_CACHE_HOME", "/tmp/xdg-cache")
+        from kan import KAN
+
+        self.norm = nn.LayerNorm(obs_dim)
+        self.kan = KAN(
+            width=[obs_dim, hidden, act_dim],
+            grid=grid,
+            k=k,
+            symbolic_enabled=False,
+            save_act=False,
+            auto_save=False,
+        )
+        self.log_std = nn.Parameter(torch.zeros(act_dim))
+
+    def forward(self, obs):
+        x = torch.tanh(self.norm(obs))
+        mean = self.kan(x)
+        std = torch.exp(self.log_std).expand_as(mean)
+        return Normal(mean, std)
+
+    def act(self, obs, deterministic=False):
+        dist = self.forward(obs)
+        action = dist.mean if deterministic else dist.sample()
+        log_prob = dist.log_prob(action).sum(-1)
+        return action, log_prob
+
+
+class KANValueNetwork(nn.Module):
+    """Kolmogorov-Arnold Network value estimator using PyKAN."""
+
+    def __init__(self, obs_dim: int, hidden: int = 16, grid: int = 3, k: int = 3):
+        super().__init__()
+        os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+        os.environ.setdefault("XDG_CACHE_HOME", "/tmp/xdg-cache")
+        from kan import KAN
+
+        self.norm = nn.LayerNorm(obs_dim)
+        self.kan = KAN(
+            width=[obs_dim, hidden, 1],
+            grid=grid,
+            k=k,
+            symbolic_enabled=False,
+            save_act=False,
+            auto_save=False,
+        )
+
+    def forward(self, obs):
+        x = torch.tanh(self.norm(obs))
+        return self.kan(x).squeeze(-1)
 
 
 class ExtraLargePolicyNetwork(nn.Module):
