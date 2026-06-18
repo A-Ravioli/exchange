@@ -590,11 +590,16 @@ def check_stop_orders(book: LimitOrderBook, current_time: float) -> List[Trade]:
             # sell stop triggers when price goes down
             should_trigger = book.last_trade_price <= (stop_order.stop_price or -math.inf)
 
-        if not should_trigger:
-            continue
+        if should_trigger:
+            triggered.append(stop_order)
 
-        triggered.append(stop_order)
-        # convert stop order to regular order
+    # remove triggered stops BEFORE submitting orders to prevent
+    # recursive re-triggering (submit_order -> check_stop_orders)
+    if triggered:
+        book.stop_orders = [o for o in book.stop_orders if o not in triggered]
+
+    # now convert and submit the triggered stop orders
+    for stop_order in triggered:
         if stop_order.order_type == "stop_loss":
             regular = Order(
                 id=stop_order.id,
@@ -616,10 +621,6 @@ def check_stop_orders(book: LimitOrderBook, current_time: float) -> List[Trade]:
                 timestamp=current_time,
             )
         all_trades.extend(submit_order(book, regular, current_time))
-
-    # remove triggered stops
-    if triggered:
-        book.stop_orders = [o for o in book.stop_orders if o not in triggered]
 
     return all_trades
 

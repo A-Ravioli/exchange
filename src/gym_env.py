@@ -28,7 +28,7 @@ class ExchangeEnv(gym.Env):
         # observation: flattened book depth (5 levels each side) + position info
         # [bid_prices(5), bid_vols(5), ask_prices(5), ask_vols(5), inventory, cash, mid_price]
         self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(22,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(23,), dtype=np.float32
         )
         
         self.book = None
